@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use rig::{
     OneOrMany,
@@ -53,7 +53,7 @@ async fn run_app(terminal: &mut Terminal<Backend>) -> Result<()> {
             }
         }
 
-        terminal.draw(|frame| render_ui(frame, &app))?;
+        terminal.draw(|frame| render_ui(frame, &mut app))?;
 
         if !event::poll(POLL_INTERVAL)? {
             continue;
@@ -153,13 +153,13 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone)]
 struct App {
     input: String,
     messages: Vec<ChatMessage>,
     input_mode: InputMode,
     awaiting_agent: bool,
     status: Status,
+    list_state: ListState,
 }
 
 impl App {
@@ -170,6 +170,7 @@ impl App {
             input_mode: InputMode::Editing,
             awaiting_agent: false,
             status: Status::Ready,
+            list_state: ListState::default(),
         }
     }
 
@@ -194,6 +195,7 @@ impl App {
         self.input.clear();
         self.awaiting_agent = true;
         self.status = Status::Working;
+        self.scroll_to_bottom();
         Some(self.messages.clone())
     }
 
@@ -201,11 +203,60 @@ impl App {
         self.messages.push(ChatMessage::agent(text));
         self.awaiting_agent = false;
         self.status = Status::Ready;
+        self.scroll_to_bottom();
     }
 
     fn record_error(&mut self, msg: String) {
         self.awaiting_agent = false;
         self.status = Status::Error(msg);
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        if !self.messages.is_empty() {
+            self.list_state.select(Some(self.messages.len() - 1));
+        }
+    }
+
+    fn scroll_up(&mut self) {
+        let current = self.list_state.selected();
+        if let Some(selected) = current {
+            if selected > 0 {
+                self.list_state.select(Some(selected - 1));
+            }
+        } else if !self.messages.is_empty() {
+            self.list_state.select(Some(self.messages.len() - 1));
+        }
+    }
+
+    fn scroll_down(&mut self) {
+        let current = self.list_state.selected();
+        if let Some(selected) = current {
+            if selected < self.messages.len().saturating_sub(1) {
+                self.list_state.select(Some(selected + 1));
+            }
+        } else if !self.messages.is_empty() {
+            self.list_state.select(Some(0));
+        }
+    }
+
+    fn scroll_page_up(&mut self, page_size: usize) {
+        let current = self.list_state.selected();
+        if let Some(selected) = current {
+            self.list_state
+                .select(Some(selected.saturating_sub(page_size)));
+        } else if !self.messages.is_empty() {
+            self.list_state.select(Some(self.messages.len() - 1));
+        }
+    }
+
+    fn scroll_page_down(&mut self, page_size: usize) {
+        let current = self.list_state.selected();
+        if let Some(selected) = current {
+            let new_pos = (selected + page_size).min(self.messages.len().saturating_sub(1));
+            self.list_state.select(Some(new_pos));
+        } else if !self.messages.is_empty() {
+            self.list_state.select(Some(0));
+        }
     }
 }
 
@@ -263,41 +314,79 @@ fn handle_key_event(
             KeyCode::Char('i') | KeyCode::Enter => {
                 app.input_mode = InputMode::Editing;
             }
-            _ => {}
-        },
-        InputMode::Editing => match key.code {
-            KeyCode::Esc => {
-                app.input_mode = InputMode::Normal;
-            }
-            KeyCode::Enter => {
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-                {
-                    app.reset_error();
-                    app.input.push('\n');
-                } else if let Some(history) = app.prepare_submission() {
-                    request_completion(client.clone(), history, tx.clone());
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
+            KeyCode::PageUp => app.scroll_page_up(10),
+            KeyCode::PageDown => app.scroll_page_down(10),
+            KeyCode::Home => {
+                if !app.messages.is_empty() {
+                    app.list_state.select(Some(0));
                 }
             }
-            KeyCode::Backspace => {
-                app.reset_error();
-                app.input.pop();
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.reset_error();
-                app.input.clear();
-            }
-            KeyCode::Char(c) => {
-                app.reset_error();
-                app.input.push(c);
-            }
-            KeyCode::Tab => {
-                app.reset_error();
-                app.input.push('\t');
-            }
+            KeyCode::End => app.scroll_to_bottom(),
             _ => {}
         },
+        InputMode::Editing => {
+            // Allow scrolling with Alt or Ctrl modifiers while editing
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
+            {
+                match key.code {
+                    KeyCode::Up => {
+                        app.scroll_up();
+                        return false;
+                    }
+                    KeyCode::Down => {
+                        app.scroll_down();
+                        return false;
+                    }
+                    KeyCode::PageUp => {
+                        app.scroll_page_up(10);
+                        return false;
+                    }
+                    KeyCode::PageDown => {
+                        app.scroll_page_down(10);
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+
+            match key.code {
+                KeyCode::Esc => {
+                    app.input_mode = InputMode::Normal;
+                }
+                KeyCode::Enter => {
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                    {
+                        app.reset_error();
+                        app.input.push('\n');
+                    } else if let Some(history) = app.prepare_submission() {
+                        request_completion(client.clone(), history, tx.clone());
+                    }
+                }
+                KeyCode::Backspace => {
+                    app.reset_error();
+                    app.input.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.reset_error();
+                    app.input.clear();
+                }
+                KeyCode::Char(c) => {
+                    app.reset_error();
+                    app.input.push(c);
+                }
+                KeyCode::Tab => {
+                    app.reset_error();
+                    app.input.push('\t');
+                }
+                _ => {}
+            }
+        }
     }
 
     false
@@ -353,10 +442,8 @@ fn render_choice(choice: &OneOrMany<AssistantContent>) -> String {
                 "Tool call `{}` with args {}",
                 call.function.name, call.function.arguments
             )),
-            AssistantContent::Reasoning(reasoning) => {
-                if !reasoning.reasoning.is_empty() {
-                    segments.push(reasoning.reasoning.join("\n"));
-                }
+            AssistantContent::Reasoning(_) => {
+                // Skip reasoning/thinking tokens - don't display to user
             }
         }
     }
@@ -369,7 +456,7 @@ fn render_choice(choice: &OneOrMany<AssistantContent>) -> String {
     }
 }
 
-fn render_ui(frame: &mut Frame, app: &App) {
+fn render_ui(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -380,15 +467,15 @@ fn render_ui(frame: &mut Frame, app: &App) {
         .split(frame.area());
 
     frame.render_widget(instruction_block(app), chunks[0]);
-    frame.render_widget(messages_block(app), chunks[1]);
+    frame.render_stateful_widget(messages_block(app), chunks[1], &mut app.list_state);
     render_input(frame, chunks[2], app);
 }
 
 fn instruction_block(app: &App) -> Paragraph<'static> {
     let mode_help = match app.input_mode {
-        InputMode::Normal => "Normal mode - press i to start typing, q or Esc to quit.",
+        InputMode::Normal => "Normal: i=edit, q=quit, ↑↓/jk=scroll, PgUp/PgDn/Home/End",
         InputMode::Editing => {
-            "Editing mode - Enter to send, Shift+Enter for newline, Esc to pause typing."
+            "Editing: Enter=send, Shift+Enter=newline, Esc=normal, Ctrl/Alt+↑↓=scroll"
         }
     };
 
