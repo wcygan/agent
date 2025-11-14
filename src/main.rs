@@ -432,12 +432,39 @@ fn build_request(messages: &[ChatMessage]) -> Option<CompletionRequest> {
     })
 }
 
+fn strip_thinking_tags(text: &str) -> String {
+    let mut result = text.to_string();
+
+    // Remove all <think>...</think> blocks (handles nested tags)
+    loop {
+        if let Some(start) = result.find("<think>") {
+            if let Some(end) = result[start..].find("</think>") {
+                let end_pos = start + end + "</think>".len();
+                result.replace_range(start..end_pos, "");
+            } else {
+                // No closing tag, remove from <think> to end
+                result.truncate(start);
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    result.trim().to_string()
+}
+
 fn render_choice(choice: &OneOrMany<AssistantContent>) -> String {
     let mut segments = Vec::new();
 
     for content in choice.iter() {
         match content {
-            AssistantContent::Text(text) => segments.push(text.text.clone()),
+            AssistantContent::Text(text) => {
+                let cleaned = strip_thinking_tags(&text.text);
+                if !cleaned.is_empty() {
+                    segments.push(cleaned);
+                }
+            }
             AssistantContent::ToolCall(call) => segments.push(format!(
                 "Tool call `{}` with args {}",
                 call.function.name, call.function.arguments
