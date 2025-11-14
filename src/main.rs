@@ -299,13 +299,13 @@ fn handle_key_event(
     client: &Arc<ollama::Client>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> bool {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if matches!(
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(
             key.code,
             KeyCode::Char('c') | KeyCode::Char('d') | KeyCode::Char('q')
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
 
     match app.input_mode {
@@ -435,18 +435,68 @@ fn build_request(messages: &[ChatMessage]) -> Option<CompletionRequest> {
 fn strip_thinking_tags(text: &str) -> String {
     let mut result = text.to_string();
 
-    // Remove all <think>...</think> blocks (handles nested tags)
+    // Remove all <think>...</think> blocks by repeatedly finding the innermost ones
     loop {
+        let mut found_tag = false;
+
+        // Find the first opening tag
         if let Some(start) = result.find("<think>") {
-            if let Some(end) = result[start..].find("</think>") {
-                let end_pos = start + end + "</think>".len();
-                result.replace_range(start..end_pos, "");
-            } else {
-                // No closing tag, remove from <think> to end
-                result.truncate(start);
+            // Find the corresponding closing tag, accounting for nesting
+            let mut depth = 0;
+            let mut pos = start + "<think>".len();
+            let chars: Vec<char> = result.chars().collect();
+
+            while pos < chars.len() {
+                // Check if we're at an opening tag
+                if pos + 7 <= chars.len()
+                    && &chars[pos..pos + 7].iter().collect::<String>() == "<think>"
+                {
+                    depth += 1;
+                    pos += 7;
+                } else if pos + 8 <= chars.len()
+                    && &chars[pos..pos + 8].iter().collect::<String>() == "</think>"
+                {
+                    if depth == 0 {
+                        // Found the matching closing tag
+                        let end_pos = pos + 8;
+                        // Convert char positions to byte positions
+                        let start_byte = result
+                            .char_indices()
+                            .nth(start)
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        let end_byte = result
+                            .char_indices()
+                            .nth(end_pos)
+                            .map(|(i, _)| i)
+                            .unwrap_or(result.len());
+                        result.replace_range(start_byte..end_byte, "");
+                        found_tag = true;
+                        break;
+                    } else {
+                        depth -= 1;
+                        pos += 8;
+                    }
+                } else {
+                    pos += 1;
+                }
+            }
+
+            // If we didn't find a closing tag, remove from opening to end
+            if !found_tag {
+                let start_byte = result
+                    .char_indices()
+                    .nth(start)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                result.truncate(start_byte);
                 break;
             }
         } else {
+            break;
+        }
+
+        if !found_tag {
             break;
         }
     }
@@ -610,4 +660,256 @@ fn cursor_position(area: Rect, input: &str) -> (u16, u16) {
     }
 
     (area.x + 1 + x_offset, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_thinking_tags_simple() {
+        let input = "<think>This is thinking</think>Hello world";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_multiple() {
+        let input = "<think>First thought</think>Hello<think>Second thought</think> world";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_nested() {
+        let input = "<think>Outer<think>Inner</think>More outer</think>Clean text";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "Clean text");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_no_tags() {
+        let input = "Just normal text";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "Just normal text");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_empty() {
+        let input = "";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_only_thinking() {
+        let input = "<think>Only thinking here</think>";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_multiline() {
+        let input = "<think>\nMultiline\nthinking\n</think>Result";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "Result");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_unclosed() {
+        let input = "<think>Unclosed tag and some text after";
+        let result = strip_thinking_tags(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_cursor_position_empty_input() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (x, y) = cursor_position(area, "");
+        assert_eq!((x, y), (1, 1));
+    }
+
+    #[test]
+    fn test_cursor_position_single_line() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (x, y) = cursor_position(area, "Hello");
+        assert_eq!((x, y), (6, 1)); // 5 chars + 1 for border
+    }
+
+    #[test]
+    fn test_cursor_position_multiline() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (x, y) = cursor_position(area, "Line1\nLine2");
+        assert_eq!((x, y), (6, 2)); // 5 chars in last line + 1, y=2 for second line
+    }
+
+    #[test]
+    fn test_cursor_position_wide_characters() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (x, _y) = cursor_position(area, "Hello 世界");
+        // "世界" are wide characters, each takes 2 display width
+        assert!(x >= 9); // At least the ASCII chars (6 for "Hello " + space + wide chars)
+    }
+
+    #[test]
+    fn test_chat_message_user_to_rig() {
+        let msg = ChatMessage::user("Hello");
+        let rig_msg = msg.to_rig_message();
+        match rig_msg {
+            Message::User { content } => {
+                // Verify it's a user message with content
+                assert!(content.len() > 0);
+            }
+            _ => panic!("Expected User message"),
+        }
+    }
+
+    #[test]
+    fn test_chat_message_agent_to_rig() {
+        let msg = ChatMessage::agent("Response");
+        let rig_msg = msg.to_rig_message();
+        match rig_msg {
+            Message::Assistant { .. } => {
+                // Success
+            }
+            _ => panic!("Expected Assistant message"),
+        }
+    }
+
+    #[test]
+    fn test_app_scroll_to_bottom_empty() {
+        let mut app = App::new();
+        app.scroll_to_bottom();
+        assert_eq!(app.list_state.selected(), None);
+    }
+
+    #[test]
+    fn test_app_scroll_to_bottom_with_messages() {
+        let mut app = App::new();
+        app.messages.push(ChatMessage::user("1"));
+        app.messages.push(ChatMessage::user("2"));
+        app.messages.push(ChatMessage::user("3"));
+
+        app.scroll_to_bottom();
+        assert_eq!(app.list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn test_app_scroll_up() {
+        let mut app = App::new();
+        app.messages.push(ChatMessage::user("1"));
+        app.messages.push(ChatMessage::user("2"));
+        app.messages.push(ChatMessage::user("3"));
+
+        app.list_state.select(Some(2));
+        app.scroll_up();
+        assert_eq!(app.list_state.selected(), Some(1));
+
+        app.scroll_up();
+        assert_eq!(app.list_state.selected(), Some(0));
+
+        // Can't scroll up past 0
+        app.scroll_up();
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_app_scroll_down() {
+        let mut app = App::new();
+        app.messages.push(ChatMessage::user("1"));
+        app.messages.push(ChatMessage::user("2"));
+        app.messages.push(ChatMessage::user("3"));
+
+        app.list_state.select(Some(0));
+        app.scroll_down();
+        assert_eq!(app.list_state.selected(), Some(1));
+
+        app.scroll_down();
+        assert_eq!(app.list_state.selected(), Some(2));
+
+        // Can't scroll down past end
+        app.scroll_down();
+        assert_eq!(app.list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn test_app_scroll_page_up() {
+        let mut app = App::new();
+        for i in 0..20 {
+            app.messages.push(ChatMessage::user(format!("{}", i)));
+        }
+
+        app.list_state.select(Some(15));
+        app.scroll_page_up(10);
+        assert_eq!(app.list_state.selected(), Some(5));
+
+        app.scroll_page_up(10);
+        assert_eq!(app.list_state.selected(), Some(0)); // Saturates at 0
+    }
+
+    #[test]
+    fn test_app_scroll_page_down() {
+        let mut app = App::new();
+        for i in 0..20 {
+            app.messages.push(ChatMessage::user(format!("{}", i)));
+        }
+
+        app.list_state.select(Some(5));
+        app.scroll_page_down(10);
+        assert_eq!(app.list_state.selected(), Some(15));
+
+        app.scroll_page_down(10);
+        assert_eq!(app.list_state.selected(), Some(19)); // Saturates at end
+    }
+
+    #[test]
+    fn test_app_record_agent_response_scrolls_to_bottom() {
+        let mut app = App::new();
+        app.messages.push(ChatMessage::user("1"));
+        app.messages.push(ChatMessage::user("2"));
+        app.awaiting_agent = true;
+
+        app.record_agent_response("Response".to_string());
+
+        assert_eq!(app.messages.len(), 3);
+        assert!(!app.awaiting_agent);
+        assert_eq!(app.list_state.selected(), Some(2)); // Auto-scrolled to bottom
+    }
+
+    #[test]
+    fn test_app_prepare_submission_scrolls_to_bottom() {
+        let mut app = App::new();
+        app.input = "Test message".to_string();
+
+        let result = app.prepare_submission();
+
+        assert!(result.is_some());
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.list_state.selected(), Some(0)); // Auto-scrolled to bottom
+        assert!(app.awaiting_agent);
+    }
+
+    #[test]
+    fn test_app_prepare_submission_empty_input() {
+        let mut app = App::new();
+        app.input = "   ".to_string();
+
+        let result = app.prepare_submission();
+
+        assert!(result.is_none());
+        assert_eq!(app.messages.len(), 0);
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn test_app_prepare_submission_while_awaiting() {
+        let mut app = App::new();
+        app.input = "Test".to_string();
+        app.awaiting_agent = true;
+
+        let result = app.prepare_submission();
+
+        assert!(result.is_none());
+        assert_eq!(app.input, "Test"); // Input not cleared
+    }
 }
