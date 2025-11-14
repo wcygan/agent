@@ -310,8 +310,8 @@ fn handle_key_event(
 
     match app.input_mode {
         InputMode::Normal => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return true,
-            KeyCode::Char('i') | KeyCode::Enter => {
+            KeyCode::Char('q') => return true,
+            KeyCode::Esc => {
                 app.input_mode = InputMode::Editing;
             }
             KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
@@ -550,9 +550,9 @@ fn render_ui(frame: &mut Frame, app: &mut App) {
 
 fn instruction_block(app: &App) -> Paragraph<'static> {
     let mode_help = match app.input_mode {
-        InputMode::Normal => "Normal: i=edit, q=quit, ↑↓/jk=scroll, PgUp/PgDn/Home/End",
+        InputMode::Normal => "Normal: Esc=edit, q=quit, ↑↓/jk=scroll, PgUp/PgDn/Home/End",
         InputMode::Editing => {
-            "Editing: Enter=send, Shift+Enter=newline, Esc=normal, Ctrl/Alt+↑↓=scroll"
+            "Editing: Enter=send, Shift+Enter=newline, Esc=toggle, Ctrl/Alt+↑↓=scroll"
         }
     };
 
@@ -911,5 +911,32 @@ mod tests {
 
         assert!(result.is_none());
         assert_eq!(app.input, "Test"); // Input not cleared
+    }
+
+    #[test]
+    fn test_input_mode_default() {
+        let app = App::new();
+        assert_eq!(app.input_mode, InputMode::Editing);
+    }
+
+    #[test]
+    fn test_input_mode_toggle_from_editing() {
+        let mut app = App::new();
+        assert_eq!(app.input_mode, InputMode::Editing);
+
+        // Toggle to Normal
+        app.input_mode = InputMode::Normal;
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_input_mode_toggle_from_normal() {
+        let mut app = App::new();
+        app.input_mode = InputMode::Normal;
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // Toggle to Editing
+        app.input_mode = InputMode::Editing;
+        assert_eq!(app.input_mode, InputMode::Editing);
     }
 }
